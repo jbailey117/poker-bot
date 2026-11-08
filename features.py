@@ -19,15 +19,29 @@ import numpy as np
 import fast_eval
 from game import Action, Street
 
-FEATURE_VERSION = 1
+FEATURE_VERSION = 2   # what new data is generated with; extract() can still produce v1
 
 # Range weightings used for the equity features (postflop). Preflop only the
 # random-hand equity exists, and it is copied into the other slot.
 EQ_KS = (0.0, 1.5)
 
-OPP_KEYS = ("aggression", "fold_rate", "range_factor", "showdown_rate", "experience")
+OPP_KEYS_V1 = ("aggression", "fold_rate", "range_factor", "showdown_rate", "experience")
+# v2 adds situation-specific opponent stats (see agent.opp_stats):
+#   pf_raise_rate        raises per preflop action
+#   post_bet_rate        bets when checked to / first to act after the flop
+#   post_fold_to_bet     folds when facing a bet after the flop
+#   post_raise_to_bet    raises when facing a bet after the flop
+#   aggr_sd_strength     their showdown hand strength after betting the turn/river
+#   passive_sd_strength  their showdown hand strength otherwise
+#   sd_seen              how many showdowns we've seen (0..1)
+OPP_KEYS_V2 = OPP_KEYS_V1 + ("pf_raise_rate", "post_bet_rate", "post_fold_to_bet", "post_raise_to_bet",
+                             "aggr_sd_strength", "passive_sd_strength", "sd_seen")
+OPP_KEYS = OPP_KEYS_V2
 OPP_PRIORS = {"aggression": 1 / 3, "fold_rate": 0.4, "range_factor": 1.05,
-              "showdown_rate": 0.3, "experience": 0.0}
+              "showdown_rate": 0.3, "experience": 0.0,
+              "pf_raise_rate": 1 / 3, "post_bet_rate": 1 / 3, "post_fold_to_bet": 1 / 3,
+              "post_raise_to_bet": 1 / 6, "aggr_sd_strength": 0.75, "passive_sd_strength": 0.55,
+              "sd_seen": 0.0}
 
 FEATURE_NAMES = [
     # --- street / position
@@ -48,10 +62,22 @@ FEATURE_NAMES = [
     "board_n", "board_paired", "board_max_suit", "board_conn",
     # --- my made hand (category 0..8 / 8, -1 preflop)
     "made_category",
-    # --- opponent model
-    *("opp_" + k for k in OPP_KEYS),
 ]
+FEATURE_SETS = {
+    1: FEATURE_NAMES + ["opp_" + k for k in OPP_KEYS_V1],
+    2: FEATURE_NAMES + ["opp_" + k for k in OPP_KEYS_V2],
+}
+_OPP_KEYS_BY_VERSION = {1: OPP_KEYS_V1, 2: OPP_KEYS_V2}
+FEATURE_NAMES = FEATURE_SETS[FEATURE_VERSION]
 N_FEATURES = len(FEATURE_NAMES)
+
+
+def version_of(names) -> int | None:
+    """Which feature version a model's feature list corresponds to."""
+    for v, ns in FEATURE_SETS.items():
+        if list(names) == ns:
+            return v
+    return None
 
 _RAISES = (Action.RAISE_HALF, Action.RAISE_POT)
 # 5-rank windows for straights; ranks 0 (six) .. 8 (ace); A-6-7-8-9 wheel too.
@@ -102,8 +128,9 @@ def _made_category(hole, board) -> float:
     return (score >> 20) / 8.0
 
 
-def extract(obs, eq_fn, opp: dict | None = None) -> np.ndarray:
+def extract(obs, eq_fn, opp: dict | None = None, version: int = FEATURE_VERSION) -> np.ndarray:
     opp = {**OPP_PRIORS, **(opp or {})}
+    opp_keys = _OPP_KEYS_BY_VERSION[version]
     hist = obs.action_history
     street = obs.street
     pot = max(obs.pot, 1)
@@ -156,6 +183,6 @@ def extract(obs, eq_fn, opp: dict | None = None) -> np.ndarray:
         *_hole_features(obs.hole_cards),
         *_board_features(obs.board),
         _made_category(obs.hole_cards, obs.board),
-        *(float(opp[k]) for k in OPP_KEYS),
+        *(float(opp[k]) for k in opp_keys),
     ]
     return np.asarray(f, dtype=np.float32)

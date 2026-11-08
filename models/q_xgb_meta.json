@@ -42,9 +42,16 @@
   "opp_fold_rate",
   "opp_range_factor",
   "opp_showdown_rate",
-  "opp_experience"
+  "opp_experience",
+  "opp_pf_raise_rate",
+  "opp_post_bet_rate",
+  "opp_post_fold_to_bet",
+  "opp_post_raise_to_bet",
+  "opp_aggr_sd_strength",
+  "opp_passive_sd_strength",
+  "opp_sd_seen"
  ],
- "feature_version": 1,
+ "feature_version": 2,
  "action_cols": [
   "act_check_call",
   "act_raise_half",
@@ -55,11 +62,11 @@
   2,
   3
  ],
- "best_iteration": 126,
- "rounds_trained": 726,
+ "best_iteration": 183,
+ "rounds_trained": 783,
  "stopped_by": "early stopping",
- "best_val_rmse": 24.212032552771795,
- "baseline_val_rmse": 27.156658172607422,
+ "best_val_rmse": 15.024455767991528,
+ "baseline_val_rmse": 18.652145385742188,
  "params": {
   "objective": "reg:squarederror",
   "eval_metric": "rmse",
@@ -74,8 +81,8 @@
  },
  "residual": true,
  "data": [
-  "data/raw/run2"
+  "data/raw/run3"
  ],
- "train_rows": 3595371,
- "val_rows": 400001
+ "train_rows": 4706054,
+ "val_rows": 522380
 }

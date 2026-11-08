@@ -47,7 +47,8 @@ sys.path.insert(0, ROOT)
 
 import numpy as np  # noqa: E402
 
-from game import BIG_BLIND, STARTING_STACK, Action, AgentConfig, Game, Street, make_deal  # noqa: E402
+from game import (BIG_BLIND, BOARD_CARDS_VISIBLE, STARTING_STACK, Action, AgentConfig, Game,  # noqa: E402
+                  Street, make_deal)
 
 # name: (file, env overrides, sampling weight)
 OPPONENTS = {
@@ -68,8 +69,20 @@ OPPONENTS = {
     # ...and agent.py with whatever learned model is in models/ (if any).
     "model":           ("agent.py", {}, 2.0),
     # frozen earlier models (league-style: every past version stays in the pool)
-    "model_v3":        ("agent.py", {"MODEL_PATH": "models/v3/q_trees.npz"}, 1.5),
+    "model_v3":        ("agent.py", {"MODEL_PATH": "models/v3/q_trees.npz"}, 1.0),
+    "model_v4":        ("agent.py", {"MODEL_PATH": "models/v4/q_trees.npz"}, 1.5),
+    # held-out-style bots: nit and potodds train; balanced, trapper, guide stay
+    # OUT of training so they can be used to check generalisation
+    "style_nit":       ("opponents/style_bot.py", {"STYLE": "nit"}, 1.5),
+    "style_potodds":   ("opponents/style_bot.py", {"STYLE": "potodds"}, 1.5),
 }
+# Every frozen model in models/v*/ joins the pool automatically (league-style),
+# so each new model must keep beating all its predecessors.
+import glob as _glob
+for _d in sorted(_glob.glob(os.path.join(ROOT, "models", "v*", "q_trees.npz"))):
+    _name = "model_" + os.path.basename(os.path.dirname(_d))
+    if _name not in OPPONENTS:
+        OPPONENTS[_name] = ("agent.py", {"MODEL_PATH": os.path.relpath(_d, ROOT)}, 1.0)
 OPP_NAMES = list(OPPONENTS)
 HALF_LENGTH = 1000   # hands between new_half() calls, like the tournament
 
@@ -109,18 +122,41 @@ class Bot:
         self.mod.new_half(AgentConfig(), self.mem)
 
     def act(self, obs):
-        return self.mod.choose_action(obs, self.mem)
+        a = self.mod.choose_action(obs, self.mem)
+        if "time_used" in self.mem:
+            self.mem["time_used"] = 0.0   # no time bank offline: bots always play at full strength
+        return a
 
     def hand_end(self, result):
         self.mod.on_hand_end(result, self.mem)
 
 
+def _allin_ev_stack(game, seat, realized, rng):
+    """If the hand went to showdown with the betting finished before the
+    river (someone all-in), replace the random runout by its expectation:
+    the learner's final stack = stack behind + equity * pot (exact over the
+    remaining runouts given both hands). Removes pure card luck from the
+    label without changing its expected value."""
+    res = game.result()
+    if not res.went_to_showdown or not game.history:
+        return realized
+    last_street = game.history[-1].street
+    if last_street == Street.RIVER:
+        return realized
+    known = game.deal.board[:BOARD_CARDS_VISIBLE[last_street]]
+    eq = fast_eval.heads_up_equity(game.deal.hole_cards[seat], game.deal.hole_cards[1 - seat], known, rng)
+    return STARTING_STACK - game.contributed[seat] + eq * res.pot
+
+
 def run_task(task):
     """Play `hands` hands of the learner vs one opponent; return a shard path."""
     import features  # imported here so each worker process builds its own tables
+    global fast_eval
+    import fast_eval
 
-    opp_name, n_hands, seed, eps, out_dir, task_id, learner_env = task
+    opp_name, n_hands, seed, eps, out_dir, task_id, learner_env, allin_ev = task
     rng = random.Random(seed)
+    ev_rng = np.random.default_rng(seed)
     learner = Bot("agent.py", learner_env)
     lmod = learner.mod
     opp_file, opp_env, _ = OPPONENTS[opp_name]
@@ -166,6 +202,8 @@ def run_task(task):
         learner.hand_end(game.hand_result(learner_seat))
         opp.hand_end(game.hand_result(1 - learner_seat))
         final_stack = STARTING_STACK + game.hand_result(learner_seat).my_net
+        if allin_ev:
+            final_stack = _allin_ev_stack(game, learner_seat, final_stack, ev_rng)
         rewards_by_hand[h] = final_stack
 
     stack = np.asarray(rows.pop("stack"), dtype=np.float32)
@@ -196,6 +234,8 @@ def main():
     ap.add_argument("--opponents", default="all", help="comma-separated names, or 'all'")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", default="data/raw/run")
+    ap.add_argument("--no-allin-ev", action="store_true",
+                    help="keep the realized all-in runout as the label (default: use its expectation)")
     ap.add_argument("--learner-env", default="", help='e.g. "USE_MODEL=0 MODEL_MARGIN=1"')
     ap.add_argument("--list-opponents", action="store_true")
     args = ap.parse_args()
@@ -218,11 +258,12 @@ def main():
     rng = random.Random(args.seed)
     weights = [OPPONENTS[n][2] for n in names]
     tasks = [(rng.choices(names, weights)[0], args.hands_per_task, args.seed * 1_000_003 + i,
-              args.eps, out_dir, args.seed * 100_000 + i, learner_env) for i in range(n_tasks)]
+              args.eps, out_dir, args.seed * 100_000 + i, learner_env, not args.no_allin_ev)
+             for i in range(n_tasks)]
     with open(os.path.join(out_dir, "meta.json"), "w") as f:
         json.dump({"feature_names": features.FEATURE_NAMES, "feature_version": features.FEATURE_VERSION,
                    "opponents": OPP_NAMES, "eps": args.eps, "hands": n_tasks * args.hands_per_task,
-                   "seed": args.seed, "learner_env": learner_env, "actions": [a.name for a in Action]}, f, indent=1)
+                   "seed": args.seed, "learner_env": learner_env, "allin_ev": not args.no_allin_ev, "actions": [a.name for a in Action]}, f, indent=1)
 
     print(f"{n_tasks} tasks x {args.hands_per_task} hands on {args.workers} workers -> {out_dir}")
     t0 = time.time()

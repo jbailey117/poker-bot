@@ -62,12 +62,24 @@ def _load_q_model():
     try:
         with open(meta_path) as f:
             meta = json.load(f)
-        if meta["feature_names"] != features.FEATURE_NAMES:
-            print("[agent] model features don't match features.py; not using the model",
+        version = features.version_of(meta["feature_names"])
+        if version is None:
+            print("[agent] model features don't match any version in features.py; not using the model",
                   file=sys.stderr)
             return None
         model = TreeModel.load(path)
-        model.predict(np.zeros((3, features.N_FEATURES + 3), dtype=np.float32))  # warm up
+        # Residual models also ship split parts: V(s) (state value) and
+        # A(s, a) (per-action part). Q = V + A, but V only matters when FOLD
+        # is legal, so evaluating them separately is much cheaper.
+        mdir = os.path.dirname(path)
+        if os.path.exists(os.path.join(mdir, "a_trees.npz")) and os.path.exists(os.path.join(mdir, "v_trees.npz")):
+            model.a_part = TreeModel.load(os.path.join(mdir, "a_trees.npz"))
+            model.v_part = TreeModel.load(os.path.join(mdir, "v_trees.npz"))
+        else:
+            model.a_part = model.v_part = None
+        model.feature_version = version
+        model.n_features = len(meta["feature_names"])
+        model.predict(np.zeros((3, model.n_features + 3), dtype=np.float32))  # warm up
         return model
     except Exception:
         print(f"[agent] could not load the model:\n{traceback.format_exc()}", file=sys.stderr)
@@ -166,6 +178,12 @@ def new_half(config: AgentConfig, memory: dict) -> None:
     memory["opp_folds"] = 0      # ...and the opponent folded
     memory["showdowns"] = 0
     memory["exceptions"] = 0     # strategy errors caught by choose_action()
+    # Situation-specific opponent stats (feature version 2).
+    for k in ("pf_actions", "pf_raises", "post_unopened", "post_bets", "post_facing",
+              "post_raise_vs", "post_folds", "aggr_sd_n", "pas_sd_n"):
+        memory[k] = 0
+    memory["aggr_sd_sum"] = 0.0
+    memory["pas_sd_sum"] = 0.0
 
 
 # ---- Helpers ------------------------------------------------------------------
@@ -176,16 +194,37 @@ def _start_hand_if_new(obs: Observation, memory: dict) -> None:
         memory["seen_hist"] = 0
         memory["cache"] = {}
         memory["i_bet"] = False
+        # chips each player has in on each street: [me, opp]; blinds preflop
+        memory["tot"] = {0: [1, 2] if obs.is_button else [2, 1]}
+        memory["opp_late_aggr"] = False   # opponent bet/raised on the turn or river
 
 
 def _update_opp_model(obs: Observation, memory: dict) -> None:
     """Count opponent actions we haven't seen yet in this hand's history."""
     hist = obs.action_history
+    tot = memory.setdefault("tot", {0: [0, 0]})
     for a in hist[memory["seen_hist"]:]:
-        if not a.is_me:
-            memory["opp_actions"] += 1
-            if a.action in (Action.RAISE_HALF, Action.RAISE_POT):
-                memory["opp_raises"] += 1
+        t = tot.setdefault(int(a.street), [0, 0])
+        if a.is_me:
+            t[0] = a.street_total
+            continue
+        raised = a.action in (Action.RAISE_HALF, Action.RAISE_POT)
+        facing = t[0] > t[1]
+        memory["opp_actions"] += 1
+        memory["opp_raises"] += raised
+        if a.street == Street.PREFLOP:
+            memory["pf_actions"] += 1
+            memory["pf_raises"] += raised
+        else:
+            if facing:
+                memory["post_facing"] += 1
+                memory["post_raise_vs"] += raised
+            else:
+                memory["post_unopened"] += 1
+                memory["post_bets"] += raised
+            if raised and a.street >= Street.TURN:
+                memory["opp_late_aggr"] = True
+        t[1] = a.street_total
     memory["seen_hist"] = len(hist)
 
 
@@ -214,6 +253,13 @@ def opp_stats(memory: dict) -> dict:
         "range_factor": _range_factor(memory),
         "showdown_rate": (memory["showdowns"] + 3) / (hands + 10),
         "experience": min(hands / 200.0, 1.0),
+        "pf_raise_rate": (memory["pf_raises"] + 1) / (memory["pf_actions"] + 3),
+        "post_bet_rate": (memory["post_bets"] + 1) / (memory["post_unopened"] + 3),
+        "post_fold_to_bet": (memory["post_folds"] + 1) / (memory["post_facing"] + 3),
+        "post_raise_to_bet": (memory["post_raise_vs"] + 0.5) / (memory["post_facing"] + 3),
+        "aggr_sd_strength": (memory["aggr_sd_sum"] + 0.75 * 3) / (memory["aggr_sd_n"] + 3),
+        "passive_sd_strength": (memory["pas_sd_sum"] + 0.55 * 3) / (memory["pas_sd_n"] + 3),
+        "sd_seen": min((memory["aggr_sd_n"] + memory["pas_sd_n"]) / 50.0, 1.0),
     }
 
 
@@ -406,15 +452,23 @@ _MODEL_ACTIONS = (Action.CHECK_CALL, Action.RAISE_HALF, Action.RAISE_POT)
 def _model_values(obs: Observation, memory: dict) -> dict:
     """Predicted bb won from here for each legal action (FOLD is exactly 0)."""
     base = SAMPLES_PREFLOP if obs.street == Street.PREFLOP else SAMPLES_POSTFLOP
-    x = features.extract(obs, lambda k: _equity(obs, memory, k, base), opp_stats(memory))
+    nf = Q_MODEL.n_features
+    x = features.extract(obs, lambda k: _equity(obs, memory, k, base), opp_stats(memory),
+                         version=Q_MODEL.feature_version)
     cands = [a for a in _MODEL_ACTIONS if a in obs.legal_actions]
-    rows = np.zeros((len(cands), features.N_FEATURES + 3), dtype=np.float32)
-    rows[:, :features.N_FEATURES] = x
+    rows = np.zeros((len(cands), nf + 3), dtype=np.float32)
+    rows[:, :nf] = x
     for i, a in enumerate(cands):
-        rows[i, features.N_FEATURES + int(a) - 1] = 1.0
-    q = Q_MODEL.predict(rows)
+        rows[i, nf + int(a) - 1] = 1.0
+    fold_legal = Action.FOLD in obs.legal_actions
+    if Q_MODEL.a_part is not None:
+        q = Q_MODEL.a_part.predict(rows)
+        if fold_legal:      # need absolute values to compare with FOLD = 0
+            q = q + Q_MODEL.v_part.predict(rows[:1])[0]
+    else:
+        q = Q_MODEL.predict(rows)
     values = {a: float(q[i]) for i, a in enumerate(cands)}
-    if Action.FOLD in obs.legal_actions:
+    if fold_legal:
         values[Action.FOLD] = 0.0
     return values
 
@@ -532,7 +586,25 @@ def on_hand_end(result: HandResult, memory: dict) -> None:
             # it in action_history. Count it here so _aggression() isn't
             # biased toward raises.
             memory["opp_actions"] += 1
-        if memory.get("hand") == result.hand_index and memory.get("i_bet"):
+            if len(result.board) >= 3:          # folded to a bet after the flop
+                memory["post_facing"] += 1
+                memory["post_folds"] += 1
+            else:
+                memory["pf_actions"] += 1
+        same_hand = memory.get("hand") == result.hand_index
+        if (result.went_to_showdown and result.opp_hole is not None and len(result.board) == 5
+                and same_hand and memory.get("level", 0) <= 2):
+            # How strong was what they showed down (equity vs a random hand on
+            # this board), split by whether they bet the turn/river: a
+            # bluff detector.
+            strength = fast_eval.equity(result.opp_hole, result.board, 150, memory["rng"])
+            if memory.get("opp_late_aggr"):
+                memory["aggr_sd_n"] += 1
+                memory["aggr_sd_sum"] += strength
+            else:
+                memory["pas_sd_n"] += 1
+                memory["pas_sd_sum"] += strength
+        if same_hand and memory.get("i_bet"):
             memory["our_bet_hands"] += 1
             if opp_folded:
                 memory["opp_folds"] += 1

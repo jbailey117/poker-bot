@@ -194,6 +194,10 @@ def main():
         v_full.set_param({"device": "cpu"})
         v_full.save_model(os.path.join(out, "v_xgb.ubj"))
         tree_model.export([v_full, bst], npz)
+        # Split copies for fast play: V(s) is the same for every action, so the
+        # bot only needs it when FOLD (worth exactly 0) is an option.
+        tree_model.export(v_full, os.path.join(out, "v_trees.npz"))
+        tree_model.export(bst, os.path.join(out, "a_trees.npz"), base_score=0.0)
         ref = bst.predict(xgb.DMatrix(check, feature_names=names,
                                       base_margin=v_full.inplace_predict(check[:, :n_state])))
     else:

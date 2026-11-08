@@ -30,7 +30,7 @@ def _booster_trees(booster):
     return base_score, learner["gradient_booster"]["model"]["trees"]
 
 
-def export(booster, path: str) -> None:
+def export(booster, path: str, base_score: float | None = None) -> None:
     """Flatten an xgboost Booster (reg:squarederror, numeric splits) to .npz.
 
     `booster` may also be a list [first, second, ...]: their trees are summed
@@ -39,7 +39,9 @@ def export(booster, path: str) -> None:
     (xgboost ignores base_score when a base_margin is given). Used for the
     residual model: Q(s, a) = V(s) + A(s, a)."""
     boosters = booster if isinstance(booster, (list, tuple)) else [booster]
-    base_score, trees = _booster_trees(boosters[0])
+    first_base, trees = _booster_trees(boosters[0])
+    if base_score is None:
+        base_score = first_base
     trees = list(trees)
     for b in boosters[1:]:
         trees += _booster_trees(b)[1]

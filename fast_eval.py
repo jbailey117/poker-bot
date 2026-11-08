@@ -155,3 +155,29 @@ def equity(hole, board, n: int, rng: np.random.Generator, range_k: float = 0.0) 
         else:
             out.append(float(result.mean()))
     return out if isinstance(range_k, (tuple, list)) else out[0]
+
+
+def heads_up_equity(hole_a, hole_b, board, rng: np.random.Generator, n: int = 3000) -> float:
+    """Equity of hole_a vs the KNOWN hole_b given the known board cards:
+    exact over all runouts when 0-2 cards are missing, sampled otherwise.
+    Used offline to replace an all-in's random runout by its expectation."""
+    build_tables()
+    board = [int(c) for c in board]
+    dead = np.zeros(NUM_CARDS, dtype=bool)
+    dead[list(hole_a) + list(hole_b) + board] = True
+    deck = np.flatnonzero(~dead)
+    need = 5 - len(board)
+    if need == 0:
+        runouts = np.zeros((1, 0), dtype=np.intp)
+    elif need <= 2:
+        runouts = np.asarray(list(combinations(deck.tolist(), need)), dtype=np.intp).reshape(-1, need)
+    else:
+        runouts = deck[np.argpartition(rng.random((n, deck.size)), need, axis=1)[:, :need]]
+    m = runouts.shape[0]
+    full = np.concatenate([np.broadcast_to(np.asarray(board, dtype=np.intp), (m, len(board))), runouts], axis=1)
+    tr, ts = _triple_keys(full)
+    pa, sa = _pair_keys(np.asarray([hole_a], dtype=np.intp))
+    pb, sb = _pair_keys(np.asarray([hole_b], dtype=np.intp))
+    a = _best(np.broadcast_to(pa, (m, 10)), np.broadcast_to(sa, (m, 10)), tr, ts)
+    b = _best(np.broadcast_to(pb, (m, 10)), np.broadcast_to(sb, (m, 10)), tr, ts)
+    return float(((a > b) + 0.5 * (a == b)).mean())

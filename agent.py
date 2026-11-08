@@ -124,8 +124,8 @@ def _load_preflop_table():
 PREFLOP_TABLE = _load_preflop_table()
 
 # rename as your team/bot's name
-PARTICIPANT = "TotallyAwesomeDatathonParticipant"
-AGENT_NAME = "EquityBot-v4-xgb"
+PARTICIPANT = "Calypso"
+AGENT_NAME = "Coderot Verity"
 
 
 # ===== YOUR CODE HERE =====

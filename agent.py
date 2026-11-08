@@ -47,38 +47,56 @@ fast_eval.build_tables()
 fast_eval.equity((0, 1, 2, 3, 4), (), 50, np.random.default_rng(0))  # warm numpy code paths
 
 
+def _load_one_model(path):
+    import json
+    from tree_model import TreeModel
+    with open(os.path.join(os.path.dirname(path), "q_xgb_meta.json")) as f:
+        meta = json.load(f)
+    version = features.version_of(meta["feature_names"])
+    if version is None:
+        raise ValueError(f"{path}: model features don't match any version in features.py")
+    model = TreeModel.load(path)
+    # Residual models also ship split parts: V(s) (state value) and
+    # A(s, a) (per-action part). Q = V + A, but V only matters when FOLD
+    # is legal, so evaluating them separately is much cheaper.
+    mdir = os.path.dirname(path)
+    if os.path.exists(os.path.join(mdir, "a_trees.npz")) and os.path.exists(os.path.join(mdir, "v_trees.npz")):
+        model.a_part = TreeModel.load(os.path.join(mdir, "a_trees.npz"))
+        model.v_part = TreeModel.load(os.path.join(mdir, "v_trees.npz"))
+    else:
+        model.a_part = model.v_part = None
+    model.feature_version = version
+    model.n_features = len(meta["feature_names"])
+    return model
+
+
 def _load_q_model():
     """Load the learned action-value model (models/q_trees.npz, the numpy
     export of the XGBoost model) if it exists and was trained on exactly the
     features features.py computes. Any problem -> None, and the bot plays its
-    hand-written rules instead. Set USE_MODEL=0 to force the rules (testing)."""
-    import json
+    hand-written rules instead. Set USE_MODEL=0 to force the rules (testing).
+    MODEL_PATH may list several models separated by commas: their Q values
+    are averaged (merged into one forest, so it costs one prediction)."""
     from tree_model import TreeModel
     here = os.path.dirname(os.path.abspath(__file__))
-    path = os.path.join(here, os.environ.get("MODEL_PATH", "models/q_trees.npz"))
-    meta_path = os.path.join(os.path.dirname(path), "q_xgb_meta.json")
-    if os.environ.get("USE_MODEL", "1") == "0" or not os.path.exists(path):
+    paths = [os.path.join(here, p.strip())
+             for p in os.environ.get("MODEL_PATH", "models/q_trees.npz").split(",") if p.strip()]
+    if os.environ.get("USE_MODEL", "1") == "0" or not paths or not all(os.path.exists(p) for p in paths):
         return None
     try:
-        with open(meta_path) as f:
-            meta = json.load(f)
-        version = features.version_of(meta["feature_names"])
-        if version is None:
-            print("[agent] model features don't match any version in features.py; not using the model",
-                  file=sys.stderr)
-            return None
-        model = TreeModel.load(path)
-        # Residual models also ship split parts: V(s) (state value) and
-        # A(s, a) (per-action part). Q = V + A, but V only matters when FOLD
-        # is legal, so evaluating them separately is much cheaper.
-        mdir = os.path.dirname(path)
-        if os.path.exists(os.path.join(mdir, "a_trees.npz")) and os.path.exists(os.path.join(mdir, "v_trees.npz")):
-            model.a_part = TreeModel.load(os.path.join(mdir, "a_trees.npz"))
-            model.v_part = TreeModel.load(os.path.join(mdir, "v_trees.npz"))
+        ms = [_load_one_model(p) for p in paths]
+        if len({(m.feature_version, m.n_features) for m in ms}) != 1:
+            raise ValueError("ensemble members use different feature sets")
+        if len(ms) == 1:
+            model = ms[0]
         else:
-            model.a_part = model.v_part = None
-        model.feature_version = version
-        model.n_features = len(meta["feature_names"])
+            model = TreeModel.blend(ms)
+            if all(m.a_part is not None for m in ms):
+                model.a_part = TreeModel.blend([m.a_part for m in ms])
+                model.v_part = TreeModel.blend([m.v_part for m in ms])
+            else:
+                model.a_part = model.v_part = None
+            model.feature_version, model.n_features = ms[0].feature_version, ms[0].n_features
         model.predict(np.zeros((3, model.n_features + 3), dtype=np.float32))  # warm up
         return model
     except Exception:

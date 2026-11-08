@@ -84,5 +84,9 @@
   "data/raw/round_v6"
  ],
  "train_rows": 4859536,
- "val_rows": 539727
+ "val_rows": 539727,
+ "ensemble_of": [
+  "models/v6",
+  "models/candidates/round_v7b"
+ ]
 }

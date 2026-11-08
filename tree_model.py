@@ -105,6 +105,26 @@ class TreeModel:
         with np.load(path) as z:
             return cls({k: z[k] for k in z.files})
 
+    def save(self, path: str) -> None:
+        np.savez_compressed(path, left=self.left, right=self.right, feat=self.feat, cond=self.cond,
+                            default_left=self.default_left, is_leaf=self.is_leaf, roots=self.roots,
+                            base_score=np.float32(self.base), max_depth=np.int32(self.depth))
+
+    @classmethod
+    def blend(cls, models, weights=None) -> "TreeModel":
+        """One forest predicting sum(w_i * model_i(x)) (default: the mean)."""
+        w = list(weights) if weights is not None else [1.0 / len(models)] * len(models)
+        offs = np.cumsum([0] + [len(m.left) for m in models[:-1]])
+        cat = lambda name, shift=False: np.concatenate(
+            [getattr(m, name) + (o if shift else 0) for m, o in zip(models, offs)])
+        cond = np.concatenate([np.where(m.is_leaf, m.cond * wi, m.cond).astype(np.float32)
+                               for m, wi in zip(models, w)])
+        return cls({"left": cat("left", True).astype(np.int32), "right": cat("right", True).astype(np.int32),
+                    "feat": cat("feat"), "cond": cond, "default_left": cat("default_left"),
+                    "is_leaf": cat("is_leaf"), "roots": cat("roots", True).astype(np.int32),
+                    "base_score": np.float32(sum(wi * m.base for m, wi in zip(models, w))),
+                    "max_depth": np.int32(max(m.depth for m in models))})
+
     @property
     def n_trees(self) -> int:
         return len(self.roots)

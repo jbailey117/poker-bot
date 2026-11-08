@@ -285,10 +285,11 @@ def _speed_level(obs: Observation, memory: dict) -> int:
     """How much to economise, from the estimated judge-charged time so far
     (memory["time_used"], see choose_action) vs a steady pace through the half.
         0 full strength           1 half the samples
-        2 few samples (model on)  3 rules only, few samples
-        4 rules only, minimal samples
-    The model needs a second equity estimate plus a prediction, so dropping
-    it (level 3) is the big saving."""
+        2 120 samples             3 60 samples
+        4 rules only, minimal samples (emergency)
+    The model stays on through level 3: with only 60 samples it still beats
+    the full-strength rules by ~3.6 bb/deal, and the prediction itself is
+    cheap next to the Monte Carlo equity."""
     used = memory.get("time_used", 0.0)
     if used > HARD_LIMIT_2:
         return 4
@@ -500,7 +501,7 @@ def _rules(obs: Observation, memory: dict) -> Action:
 def _decide(obs: Observation, memory: dict) -> Action:
     _start_hand_if_new(obs, memory)
     _update_opp_model(obs, memory)
-    use_model = (Q_MODEL is not None and memory.get("level", 0) <= 2
+    use_model = (Q_MODEL is not None and memory.get("level", 0) <= 3
                  and str(int(obs.street)) in MODEL_STREETS)
     if not use_model:
         return _rules(obs, memory)
@@ -549,7 +550,7 @@ def choose_action(obs: Observation, memory: dict) -> Action:
         _account_time(memory, t0, c0)
         if DEBUG_TIME and memory["calls"] % 500 == 0:
             print(f"[agent] hand {obs.hand_index} calls {memory['calls']} decide {memory['raw_time']:.2f}s "
-                  f"est charged {memory['time_used']:.2f}s level {memory['level']}",
+                  f"est charged {memory['time_used']:.2f}s level {memory['level']} ratio {memory.get('ratio', 0):.2f}",
                   file=sys.stderr, flush=True)
     except Exception:
         pass
@@ -574,6 +575,7 @@ def _account_time(memory: dict, t0: float, c0: float) -> None:
     memory["wall_sum"] = memory.get("wall_sum", 0.0) + wall
     memory["cpu_sum"] = memory.get("cpu_sum", 0.0) + cpu
     ratio = min(max(memory["wall_sum"] / max(memory["cpu_sum"], 1e-6), 1.0), 8.0)
+    memory["ratio"] = ratio
     charged = max(0.0, wall + server_cpu * ratio + CALL_OVERHEAD - 0.001)
     memory["time_used"] = memory.get("time_used", 0.0) + charged
     memory["raw_time"] = memory.get("raw_time", 0.0) + wall

@@ -55,11 +55,11 @@
   2,
   3
  ],
- "best_iteration": 221,
- "rounds_trained": 821,
+ "best_iteration": 126,
+ "rounds_trained": 726,
  "stopped_by": "early stopping",
- "best_val_rmse": 18.137919775804246,
- "baseline_val_rmse": 20.815500259399414,
+ "best_val_rmse": 24.212032552771795,
+ "baseline_val_rmse": 27.156658172607422,
  "params": {
   "objective": "reg:squarederror",
   "eval_metric": "rmse",
@@ -72,9 +72,10 @@
   "colsample_bytree": 0.8,
   "lambda": 10.0
  },
+ "residual": true,
  "data": [
-  "data/raw/run1"
+  "data/raw/run2"
  ],
- "train_rows": 734770,
- "val_rows": 81634
+ "train_rows": 3595371,
+ "val_rows": 400001
 }

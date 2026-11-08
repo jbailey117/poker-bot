@@ -78,7 +78,7 @@ Q_MODEL = _load_q_model()
 
 # rename as your team/bot's name
 PARTICIPANT = "TotallyAwesomeDatathonParticipant"
-AGENT_NAME = "EquityBot-v3-xgb"
+AGENT_NAME = "EquityBot-v4-xgb"
 
 
 # ===== YOUR CODE HERE =====

@@ -109,6 +109,9 @@ def main():
     ap.add_argument("--set-size", type=int, default=100, help="rounds per logged 'set'")
     ap.add_argument("--val-frac", type=float, default=0.1)
     ap.add_argument("--out", default="models")
+    ap.add_argument("--residual", action="store_true",
+                    help="first fit V(s) on state features only, then fit the action model on top of it "
+                         "(base_margin), so its trees focus on differences BETWEEN actions")
     args = ap.parse_args()
 
     d = load([os.path.join(ROOT, p) if not os.path.isabs(p) else p for p in args.data])
@@ -134,6 +137,37 @@ def main():
         "eta": args.eta, "max_depth": args.max_depth, "min_child_weight": args.min_child_weight,
         "subsample": 0.8, "colsample_bytree": 0.8, "lambda": 10.0,
     }
+
+    v_full = None
+    if args.residual:
+        # Stage 1: V(s) from state features only (no action columns).
+        S = d["X"][keep]
+        n_state = S.shape[1]
+        dS_va = xgb.DMatrix(S[is_val], y[is_val])
+        quiet = dict(num_boost_round=100_000, verbose_eval=False)
+
+        def fit_v(rows):
+            dS = xgb.DMatrix(S[rows], y[rows])
+            stop = xgb.callback.EarlyStopping(rounds=200, save_best=True, data_name="val", metric_name="rmse")
+            return xgb.train(params, dS, evals=[(dS_va, "val")], callbacks=[stop], **quiet)
+
+        t_v = time.time()
+        tr_rows = np.flatnonzero(~is_val)
+        v_full = fit_v(tr_rows)
+        # Out-of-fold V for training rows (5 folds by hand), so the action
+        # model never sees a V that was fitted to the same rows' rewards.
+        uniq_tr, inv = np.unique(hands[tr_rows], return_inverse=True)
+        fold = np.random.default_rng(1).integers(0, 5, len(uniq_tr))[inv]
+        oof = np.zeros(len(tr_rows), dtype=np.float32)
+        for k in range(5):
+            vk = fit_v(tr_rows[fold != k])
+            oof[fold == k] = vk.inplace_predict(S[tr_rows[fold == k]])
+        base_va = v_full.inplace_predict(S[is_val])
+        v_rmse = float(np.sqrt(np.mean((base_va - y[is_val]) ** 2)))
+        print(f"stage 1: V(s) val rmse {v_rmse:.4f} ({v_full.num_boosted_rounds()} trees, "
+              f"5-fold out-of-fold baseline for training) in {time.time() - t_v:.0f}s")
+        dtr.set_base_margin(oof)
+        dva.set_base_margin(base_va)
     logger = Logger(args.minutes * 60, args.set_size, baseline)
     stopper = xgb.callback.EarlyStopping(rounds=args.patience, save_best=True, data_name="val",
                                          metric_name="rmse")
@@ -155,9 +189,17 @@ def main():
     # numpy-only copy that agent.py actually loads (fast, no xgboost needed)
     import tree_model
     npz = os.path.join(out, "q_trees.npz")
-    tree_model.export(bst, npz)
     check = X[is_val][:5000]
-    diff = np.abs(tree_model.TreeModel.load(npz).predict(check) - bst.inplace_predict(check)).max()
+    if v_full is not None:
+        v_full.set_param({"device": "cpu"})
+        v_full.save_model(os.path.join(out, "v_xgb.ubj"))
+        tree_model.export([v_full, bst], npz)
+        ref = bst.predict(xgb.DMatrix(check, feature_names=names,
+                                      base_margin=v_full.inplace_predict(check[:, :n_state])))
+    else:
+        tree_model.export(bst, npz)
+        ref = bst.inplace_predict(check)
+    diff = np.abs(tree_model.TreeModel.load(npz).predict(check) - ref).max()
     print(f"numpy export -> {npz} (max diff vs xgboost {diff:.2e})")
     if diff > 1e-3:
         raise RuntimeError("numpy tree export doesn't match xgboost")
@@ -170,7 +212,7 @@ def main():
         "action_cols": ACTION_COLS, "model_actions": list(MODEL_ACTIONS),
         "best_iteration": best_iter, "rounds_trained": len(rows), "stopped_by": stopped,
         "best_val_rmse": best_val, "baseline_val_rmse": baseline, "params": params,
-        "data": args.data, "train_rows": int((~is_val).sum()), "val_rows": int(is_val.sum()),
+        "residual": bool(args.residual), "data": args.data, "train_rows": int((~is_val).sum()), "val_rows": int(is_val.sum()),
     }
     with open(os.path.join(out, "q_xgb_meta.json"), "w") as f:
         json.dump(meta, f, indent=1)

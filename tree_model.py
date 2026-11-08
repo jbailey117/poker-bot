@@ -19,8 +19,7 @@ import json
 import numpy as np
 
 
-def export(booster, path: str) -> None:
-    """Flatten an xgboost Booster (reg:squarederror, numeric splits) to .npz."""
+def _booster_trees(booster):
     model = json.loads(booster.save_raw("json"))
     learner = model["learner"]
     objective = learner["objective"]["name"]
@@ -28,7 +27,22 @@ def export(booster, path: str) -> None:
         raise ValueError(f"unsupported objective {objective}: only identity-link regression")
     base = learner["learner_model_param"]["base_score"]
     base_score = float(json.loads(base)[0]) if base.startswith("[") else float(base)
-    trees = learner["gradient_booster"]["model"]["trees"]
+    return base_score, learner["gradient_booster"]["model"]["trees"]
+
+
+def export(booster, path: str) -> None:
+    """Flatten an xgboost Booster (reg:squarederror, numeric splits) to .npz.
+
+    `booster` may also be a list [first, second, ...]: their trees are summed
+    into one forest. Only the FIRST booster's base_score is used; the others
+    must have been trained with base_margin = the previous ones' prediction
+    (xgboost ignores base_score when a base_margin is given). Used for the
+    residual model: Q(s, a) = V(s) + A(s, a)."""
+    boosters = booster if isinstance(booster, (list, tuple)) else [booster]
+    base_score, trees = _booster_trees(boosters[0])
+    trees = list(trees)
+    for b in boosters[1:]:
+        trees += _booster_trees(b)[1]
 
     left, right, feat, cond, dleft, roots = [], [], [], [], [], []
     offset = 0

@@ -52,12 +52,12 @@ from game import BIG_BLIND, STARTING_STACK, Action, AgentConfig, Game, Street, m
 # name: (file, env overrides, sampling weight)
 OPPONENTS = {
     "random":          ("baseline-bots/baseline_random.py", {}, 1.0),
-    "calling_station": ("baseline-bots/baseline_calling_station.py", {}, 1.0),
-    "always_half":     ("baseline-bots/baseline_always_half.py", {}, 0.5),
-    "always_pot":      ("baseline-bots/baseline_always_pot.py", {}, 0.5),
-    "v1":              ("opponents/equitybot_v1.py", {}, 2.0),
+    "calling_station": ("baseline-bots/baseline_calling_station.py", {}, 2.0),
+    "always_half":     ("baseline-bots/baseline_always_half.py", {}, 1.5),
+    "always_pot":      ("baseline-bots/baseline_always_pot.py", {}, 1.0),
+    "v1":              ("opponents/equitybot_v1.py", {}, 1.5),
     # agent.py's hand-written rules (USE_MODEL=0) in several styles...
-    "self":            ("agent.py", {"USE_MODEL": "0"}, 2.0),
+    "self":            ("agent.py", {"USE_MODEL": "0"}, 1.5),
     "self_tight":      ("agent.py", {"USE_MODEL": "0", "PRE_OPEN_RAISE": "0.56", "PRE_OPEN_CALL": "0.47",
                                      "POST_CALL_MARGIN": "0.08", "BLUFF_FREQ": "0.1"}, 1.5),
     "self_loose":      ("agent.py", {"USE_MODEL": "0", "PRE_OPEN_CALL": "0.40", "PRE_CALL_MARGIN": "0.04",
@@ -67,6 +67,8 @@ OPPONENTS = {
                                      "POST_RAISE": "0.62", "BLUFF_FREQ": "0.5"}, 1.5),
     # ...and agent.py with whatever learned model is in models/ (if any).
     "model":           ("agent.py", {}, 2.0),
+    # frozen earlier models (league-style: every past version stays in the pool)
+    "model_v3":        ("agent.py", {"MODEL_PATH": "models/v3/q_trees.npz"}, 1.5),
 }
 OPP_NAMES = list(OPPONENTS)
 HALF_LENGTH = 1000   # hands between new_half() calls, like the tournament

@@ -192,6 +192,23 @@ def main():
             print(f"NOT promoted: {reasons}", flush=True)
         log(entry)
 
+        if reasons and not args.no_commit:
+            # Not promoted: still keep the model (small) and the log in git.
+            keep = os.path.join(ROOT, "models", "candidates", tag)
+            os.makedirs(keep, exist_ok=True)
+            for f in ("q_trees.npz", "q_xgb_meta.json", "a_trees.npz", "v_trees.npz", "training_loss.png"):
+                if os.path.exists(os.path.join(ROOT, cand_dir, f)):
+                    shutil.copy(os.path.join(ROOT, cand_dir, f), keep)
+            with open(os.path.join(keep, "gate.json"), "w") as f:
+                json.dump(entry, f, indent=1)
+            sh(["git", "add", "models/candidates", "models/iterations.jsonl"])
+            sh(["git", "commit", "-q", "-m",
+                f"{tag} candidate (not promoted, champion stays v{champ})\n\n"
+                f"Head-to-head vs v{champ}: {h2h['mean']:+.3f} bb/deal (CI {h2h['lo']:+.3f}..{h2h['hi']:+.3f}).\n"
+                f"Gate failures: {'; '.join(reasons)}\n\n"
+                "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>\n"])
+            print(f"committed candidate {tag} (not promoted)", flush=True)
+
         if not reasons and not args.no_commit:
             sh(["git", "add", "models", "tools", "agent.py", "features.py", "fast_eval.py", "tree_model.py",
                 "preflop_table.py", "opponents"])

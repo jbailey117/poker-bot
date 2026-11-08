@@ -93,6 +93,12 @@ class TreeModel:
         self.depth = int(arrays["max_depth"])
         # Leaf values live in `cond` at leaf nodes.
         self.leaf_value = np.where(self.is_leaf, self.cond, 0.0).astype(np.float64)
+        # Fast path (no NaN in X): child = children[2 * node + go_left]. Leaves
+        # get +inf thresholds so they always "go left" to themselves.
+        self.children = np.stack([self.right, self.left], axis=1).reshape(-1).astype(np.intp)
+        self.cond_fast = np.where(self.is_leaf, np.inf, self.cond).astype(np.float32)
+        self.feat_ip = self.feat.astype(np.intp)
+        self.roots_ip = self.roots.astype(np.intp)
 
     @classmethod
     def load(cls, path: str) -> "TreeModel":
@@ -105,10 +111,28 @@ class TreeModel:
 
     def predict(self, X) -> np.ndarray:
         X = np.asarray(X, dtype=np.float32)
+        if not np.isnan(X).any():
+            return self._predict_fast(X)
         rows = np.arange(X.shape[0])[:, None]
         node = np.broadcast_to(self.roots, (X.shape[0], len(self.roots))).copy()
         for _ in range(self.depth):
             x = X[rows, self.feat[node]]
             go_left = np.where(np.isnan(x), self.default_left[node], x < self.cond[node])
             node = np.where(go_left, self.left[node], self.right[node])
+        return self.base + self.leaf_value[node].sum(axis=1)
+
+    def _predict_fast(self, X) -> np.ndarray:
+        """Same result as predict() for NaN-free X, with ~half the numpy calls."""
+        n, f = X.shape
+        Xf = X.reshape(-1)
+        feat, cond, children = self.feat_ip, self.cond_fast, self.children
+        if n == 1:
+            node = self.roots_ip
+            for _ in range(self.depth):
+                node = children[2 * node + (Xf[feat[node]] < cond[node])]
+            return np.asarray([self.base + self.leaf_value[node].sum()])
+        off = (np.arange(n, dtype=np.intp) * f)[:, None]
+        node = np.broadcast_to(self.roots_ip, (n, len(self.roots_ip)))
+        for _ in range(self.depth):
+            node = children[2 * node + (Xf[off + feat[node]] < cond[node])]
         return self.base + self.leaf_value[node].sum(axis=1)

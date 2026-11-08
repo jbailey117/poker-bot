@@ -1,0 +1,9 @@
+# Offline training environment (NOT used by the tournament image).
+# Setup:
+#   conda create -n pokerbot-train python=3.12 -y
+#   conda activate pokerbot-train
+#   pip install -r requirements-train.txt
+-r requirements-dev.txt
+numpy
+xgboost>=3.0          # full wheel: includes CUDA support for GPU training
+matplotlib

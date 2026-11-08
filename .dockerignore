@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+heads_up_venv/
+.git/
+data/
+models/sweep/
+models/*.ubj
+models/*.png
+models/*.csv

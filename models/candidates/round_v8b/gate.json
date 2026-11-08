@@ -1,0 +1,90 @@
+{
+ "round": "round_v8b",
+ "champion": "v7",
+ "started": "2026-11-08 03:21:37",
+ "data": "data/raw/round_v8b",
+ "train": {
+  "best_val_rmse": 17.2205,
+  "best_round": 142
+ },
+ "candidates": {
+  "alone": {
+   "members": [
+    "models/candidates/round_v8b"
+   ],
+   "h2h": {
+    "mean": -0.644,
+    "lo": -0.899,
+    "hi": -0.389,
+    "think_b": 3.45,
+    "think_a": 3.95
+   },
+   "heldout": {
+    "balanced": {
+     "mean": 2.152,
+     "lo": 1.811,
+     "hi": 2.494,
+     "think_b": 2.6
+    },
+    "trapper": {
+     "mean": 2.628,
+     "lo": 2.248,
+     "hi": 3.009,
+     "think_b": 3.11
+    },
+    "guide": {
+     "mean": 3.183,
+     "lo": 3.132,
+     "hi": 3.235,
+     "think_b": 1.38
+    }
+   },
+   "heldout_avg": 2.654333333333333,
+   "reasons": [
+    "head-to-head CI lower bound -0.899 <= 0",
+    "held-out average +2.654 < champion +2.993"
+   ]
+  },
+  "ensemble": {
+   "members": [
+    "models/v6",
+    "models/candidates/round_v7b",
+    "models/candidates/round_v8b"
+   ],
+   "h2h": {
+    "mean": 0.21,
+    "lo": -0.016,
+    "hi": 0.436,
+    "think_b": 5.17,
+    "think_a": 4.78
+   },
+   "heldout": {
+    "balanced": {
+     "mean": 2.6,
+     "lo": 2.254,
+     "hi": 2.946,
+     "think_b": 4.77
+    },
+    "trapper": {
+     "mean": 2.535,
+     "lo": 2.149,
+     "hi": 2.921,
+     "think_b": 4.84
+    },
+    "guide": {
+     "mean": 3.455,
+     "lo": 3.413,
+     "hi": 3.497,
+     "think_b": 2.87
+    }
+   },
+   "heldout_avg": 2.8633333333333333,
+   "reasons": [
+    "head-to-head CI lower bound -0.016 <= 0",
+    "held-out average +2.863 < champion +2.993"
+   ]
+  }
+ },
+ "promoted": null,
+ "minutes": 47.9
+}

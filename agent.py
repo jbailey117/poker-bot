@@ -76,6 +76,23 @@ def _load_q_model():
 
 Q_MODEL = _load_q_model()
 
+
+def _load_preflop_table():
+    """Precomputed preflop equities (models/preflop_eq.npz); None -> simulate."""
+    if os.environ.get("USE_PREFLOP_TABLE", "1") == "0":
+        return None
+    try:
+        from preflop_table import PreflopTable
+        table = PreflopTable.load()
+        table.equity((0, 5, 10, 15, 20))
+        return table
+    except Exception:
+        print(f"[agent] no preflop table, simulating instead:\n{traceback.format_exc()}", file=sys.stderr)
+        return None
+
+
+PREFLOP_TABLE = _load_preflop_table()
+
 # rename as your team/bot's name
 PARTICIPANT = "TotallyAwesomeDatathonParticipant"
 AGENT_NAME = "EquityBot-v4-xgb"
@@ -98,13 +115,14 @@ def _env(name: str, default):
 # Monte Carlo samples per equity estimate (~0.6 ms per 300 samples).
 SAMPLES_PREFLOP = _env("SAMPLES_PREFLOP", 600)
 SAMPLES_POSTFLOP = _env("SAMPLES_POSTFLOP", 400)
-# Time management: aim to use at most this much of the 8 s bank per half.
-TIME_TARGET = _env("TIME_TARGET", 4.0)
-# Our own clock only measures choose_action(); the judge also charges request
-# parsing, on_hand_end() etc. Add this much per call to stay conservative.
-CALL_OVERHEAD = _env("CALL_OVERHEAD", 0.0003)
-HARD_LIMIT_1 = _env("HARD_LIMIT_1", 5.0)   # past this many seconds: 1/6 samples
-HARD_LIMIT_2 = _env("HARD_LIMIT_2", 6.0)   # past this: minimal samples
+# Time management. memory["time_used"] estimates what the judge charges
+# (see _account_time); _speed_level() economises when we run ahead of a pace
+# of TIME_TARGET seconds per half, and hard caps kick in past HARD_LIMIT_1/2.
+TIME_TARGET = _env("TIME_TARGET", 4.5)
+CALL_OVERHEAD = _env("CALL_OVERHEAD", 0.0002)   # network/serialisation we can't see
+HARD_LIMIT_1 = _env("HARD_LIMIT_1", 6.0)   # past this many seconds: rules only
+HARD_LIMIT_2 = _env("HARD_LIMIT_2", 7.0)   # past this: rules with minimal samples
+DEBUG_TIME = _env("DEBUG_TIME", 0)        # print time accounting to stderr
 
 # Preflop thresholds, in equity vs a random hand. Reference percentiles:
 # 20% -> 0.445, 50% -> 0.50, 70% -> 0.538, 80% -> 0.56, 90% -> 0.585, 95% -> 0.60
@@ -199,26 +217,65 @@ def opp_stats(memory: dict) -> dict:
     }
 
 
-def _n_samples(base: int, obs: Observation, memory: dict) -> int:
-    """Scale Monte Carlo work down if we're using the time bank too fast."""
-    used = memory["time_used"]
+def _speed_level(obs: Observation, memory: dict) -> int:
+    """How much to economise, from the estimated judge-charged time so far
+    (memory["time_used"], see choose_action) vs a steady pace through the half.
+        0 full strength           1 half the samples
+        2 few samples (model on)  3 rules only, few samples
+        4 rules only, minimal samples
+    The model needs a second equity estimate plus a prediction, so dropping
+    it (level 3) is the big saving."""
+    used = memory.get("time_used", 0.0)
     if used > HARD_LIMIT_2:
-        return 30
+        return 4
     if used > HARD_LIMIT_1:
-        return max(60, base // 6)
-    allowed = TIME_TARGET * (obs.hand_index + 1) / 1000 + 0.3
-    if used > allowed:
-        return max(100, base // 3)
-    return base
+        return 3
+    allowed = TIME_TARGET * (obs.hand_index + 1) / 1000 + 0.25
+    ratio = used / allowed
+    if ratio < 1.0:
+        return 0
+    if ratio < 1.15:
+        return 1
+    if ratio < 1.3:
+        return 2
+    return 3
+
+
+def _n_samples(base: int, obs: Observation, memory: dict) -> int:
+    """Monte Carlo samples for the current speed level."""
+    level = memory.get("level", 0)
+    if level == 0:
+        return base
+    if level == 1:
+        return base // 2
+    if level == 2:
+        return min(base, 120)
+    if level == 3:
+        return 60
+    return 25
 
 
 def _equity(obs: Observation, memory: dict, range_k: float, base: int) -> float:
     key = (len(obs.board), round(range_k, 2))
     cache = memory["cache"]
     if key not in cache:
+        if not obs.board and PREFLOP_TABLE is not None:
+            # Preflop equity vs a random hand is precomputed (range_k is
+            # ignored preflop anyway).
+            cache[key] = PREFLOP_TABLE.equity(obs.hole_cards)
+            return cache[key]
         n = _n_samples(base, obs, memory)
-        cache[key] = fast_eval.equity(obs.hole_cards, obs.board, n, memory["rng"], range_k)
+        if round(range_k, 2) in _FEATURE_KS:
+            # The model's two equity features come from one shared simulation.
+            vals = fast_eval.equity(obs.hole_cards, obs.board, n, memory["rng"], _FEATURE_KS)
+            for k, v in zip(_FEATURE_KS, vals):
+                cache[(len(obs.board), k)] = v
+        else:
+            cache[key] = fast_eval.equity(obs.hole_cards, obs.board, n, memory["rng"], range_k)
     return cache[key]
+
+
+_FEATURE_KS = tuple(round(k, 2) for k in features.EQ_KS)
 
 
 def _opp_street_raises(obs: Observation) -> int:
@@ -362,15 +419,29 @@ def _model_values(obs: Observation, memory: dict) -> dict:
     return values
 
 
+def _rules(obs: Observation, memory: dict) -> Action:
+    if obs.street == Street.PREFLOP:
+        return _preflop(obs, memory)
+    return _postflop(obs, memory)
+
+
 def _decide(obs: Observation, memory: dict) -> Action:
     _start_hand_if_new(obs, memory)
     _update_opp_model(obs, memory)
-    if obs.street == Street.PREFLOP:
-        rule_action = _preflop(obs, memory)
-    else:
-        rule_action = _postflop(obs, memory)
-    if Q_MODEL is None or str(int(obs.street)) not in MODEL_STREETS:
-        return rule_action
+    use_model = (Q_MODEL is not None and memory.get("level", 0) <= 2
+                 and str(int(obs.street)) in MODEL_STREETS)
+    if not use_model:
+        return _rules(obs, memory)
+    if MODEL_MARGIN <= 0:
+        # The model always wins ties-or-better, so the rule action is only
+        # needed as a fallback: skip computing it (saves an equity estimate).
+        try:
+            values = _model_values(obs, memory)
+            return max(values, key=values.get)
+        except Exception:
+            _report_exception(memory, "model")
+            return _rules(obs, memory)
+    rule_action = _rules(obs, memory)
     try:
         values = _model_values(obs, memory)
         best = max(values, key=values.get)
@@ -386,9 +457,11 @@ def choose_action(obs: Observation, memory: dict) -> Action:
     """Called every time it is your turn. Return one of obs.legal_actions.
     (Observation fields are documented in game.py / the participant guide.)"""
     t0 = time.perf_counter()
+    c0 = time.process_time()
     try:
         if "rng" not in memory:          # defensive: new_half not run
             new_half(AgentConfig(), memory)
+        memory["level"] = _speed_level(obs, memory)
         action = _decide(obs, memory)
         if action not in obs.legal_actions:
             action = Action.CHECK_CALL
@@ -401,11 +474,39 @@ def choose_action(obs: Observation, memory: dict) -> Action:
         action = Action.CHECK_CALL
         _report_exception(memory, "choose_action")
     try:
-        memory["time_used"] = (memory.get("time_used", 0.0) + CALL_OVERHEAD
-                               + (time.perf_counter() - t0))
+        _account_time(memory, t0, c0)
+        if DEBUG_TIME and memory["calls"] % 500 == 0:
+            print(f"[agent] hand {obs.hand_index} calls {memory['calls']} decide {memory['raw_time']:.2f}s "
+                  f"est charged {memory['time_used']:.2f}s level {memory['level']}",
+                  file=sys.stderr, flush=True)
     except Exception:
         pass
     return action
+
+
+def _account_time(memory: dict, t0: float, c0: float) -> None:
+    """Estimate what the judge charges for this request.
+
+    The judge times the whole request and charges everything after the first
+    1 ms. Our own clock (t0..now) only covers choose_action; the server work
+    around it (parsing the request, on_hand_end, building the reply) we
+    measure as CPU time this process used since the previous decision ended
+    (the bot is idle otherwise). If the CPU is shared, wall time runs ahead
+    of CPU time, so that server work is scaled by the wall/CPU ratio we see
+    while deciding."""
+    t1, c1 = time.perf_counter(), time.process_time()
+    wall, cpu = t1 - t0, c1 - c0
+    last_c = memory.get("cpu_end")
+    server_cpu = max(0.0, c0 - last_c) if last_c is not None else 0.0
+    server_cpu = min(server_cpu, 0.05)                 # ignore idle-time artefacts
+    memory["wall_sum"] = memory.get("wall_sum", 0.0) + wall
+    memory["cpu_sum"] = memory.get("cpu_sum", 0.0) + cpu
+    ratio = min(max(memory["wall_sum"] / max(memory["cpu_sum"], 1e-6), 1.0), 8.0)
+    charged = max(0.0, wall + server_cpu * ratio + CALL_OVERHEAD - 0.001)
+    memory["time_used"] = memory.get("time_used", 0.0) + charged
+    memory["raw_time"] = memory.get("raw_time", 0.0) + wall
+    memory["calls"] = memory.get("calls", 0) + 1
+    memory["cpu_end"] = c1
 
 
 def _report_exception(memory: dict, where: str) -> None:

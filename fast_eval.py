@@ -112,6 +112,9 @@ def equity(hole, board, n: int, rng: np.random.Generator, range_k: float = 0.0) 
     the opponent has bet): on the flop/turn each sampled opponent hand is
     weighted by (percentile of its current made-hand strength) ** range_k.
     Preflop it is ignored.
+
+    range_k may also be a tuple of k values: all are computed from the SAME
+    simulated deals (one simulation instead of several) and a list returned.
     """
     build_tables()
     hole = np.asarray(hole, dtype=np.intp)
@@ -139,9 +142,16 @@ def equity(hole, board, n: int, rng: np.random.Generator, range_k: float = 0.0) 
     op = _best(pr_op, ps_op, tr, ts)
     result = (me > op).astype(np.float64) + 0.5 * (me == op)
 
-    if range_k > 0 and len(board) >= 3:
-        strength = partial_scores(opp, board)
-        pct = (np.argsort(np.argsort(strength, kind="stable"), kind="stable") + 1.0) / n
-        w = pct ** range_k
-        return float((result * w).sum() / w.sum())
-    return float(result.mean())
+    ks = range_k if isinstance(range_k, (tuple, list)) else (range_k,)
+    out = []
+    pct = None
+    for k in ks:
+        if k > 0 and len(board) >= 3:
+            if pct is None:
+                strength = partial_scores(opp, board)
+                pct = (np.argsort(np.argsort(strength, kind="stable"), kind="stable") + 1.0) / n
+            w = pct ** k
+            out.append(float((result * w).sum() / w.sum()))
+        else:
+            out.append(float(result.mean()))
+    return out if isinstance(range_k, (tuple, list)) else out[0]
